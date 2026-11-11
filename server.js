@@ -91,6 +91,18 @@ const sockets = new Map(); // userId -> ws
 const userGame = new Map(); // userId -> gameId
 const games = new Map(); // gameId -> game
 let queue = []; // {userId, tc, since, bot}
+const challenges = new Map(); // id -> {id, from, to, tc, rated, timer}
+
+function endChallenge(id, reason) {
+  const c = challenges.get(id);
+  if (!c) return;
+  clearTimeout(c.timer);
+  challenges.delete(id);
+  for (const uid of [c.from, c.to]) sendUser(uid, { type: 'challengeEnd', id, reason });
+}
+function dropChallengesOf(userId, reason) {
+  for (const c of [...challenges.values()]) if (c.from === userId || c.to === userId) endChallenge(c.id, reason);
+}
 
 function send(ws, msg) {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg));
@@ -430,6 +442,7 @@ wss.on('connection', (ws) => {
     const uid = ws.userId;
     sockets.delete(uid);
     removeFromQueue(uid);
+    dropChallengesOf(uid, '상대가 접속을 종료했어요');
     const g = games.get(userGame.get(uid));
     if (g && !g.result) {
       const c = colorOf(g, uid);
@@ -522,6 +535,53 @@ function handle(ws, msg) {
       else if (msg.color !== 'w') pair = Math.random() < 0.5 ? [me, bot] : [bot, me];
       startGame(crypto.randomBytes(5).toString('hex'), pair[0], pair[1], tc, false);
       return;
+    }
+    case 'players': {
+      const list = [];
+      for (const [uid, sock] of sockets) {
+        if (uid === u.id || sock.readyState !== 1) continue;
+        const o = db.users[uid];
+        list.push({ nick: o.nick, blitz: o.ratings.blitz.r, busy: userGame.has(uid) });
+      }
+      list.sort((a, b) => a.busy - b.busy || b.blitz - a.blitz);
+      return send(ws, { type: 'players', list: list.slice(0, 50) });
+    }
+    case 'challenge': {
+      const tc = TIME_CONTROLS[msg.tc];
+      if (!tc) return;
+      const fail = (error) => send(ws, { type: 'challengeError', error });
+      const tid = nickIndex.get(String(msg.nick || '').trim().toLowerCase());
+      if (!tid) return fail('그런 닉네임의 플레이어가 없어요.');
+      if (tid === u.id) return fail('자기 자신에게는 도전할 수 없어요.');
+      if (!sockets.has(tid)) return fail('상대가 지금 접속 중이 아니에요.');
+      if (userGame.has(u.id)) return fail('게임 중에는 도전할 수 없어요.');
+      if (userGame.has(tid)) return fail('상대가 지금 다른 게임 중이에요.');
+      for (const c of [...challenges.values()]) if (c.from === u.id) endChallenge(c.id, '도전을 취소했어요');
+      const id = crypto.randomBytes(4).toString('hex');
+      const c = { id, from: u.id, to: tid, tc, rated: msg.rated !== false };
+      c.timer = setTimeout(() => endChallenge(id, '시간이 지나 도전이 만료되었어요'), 30000);
+      challenges.set(id, c);
+      const t = db.users[tid];
+      send(ws, { type: 'challengeSent', id, to: t.nick, tc: tc.id, rated: c.rated });
+      return sendUser(tid, { type: 'challenge', id, from: u.nick, rating: u.ratings[tc.cat].r, tc: tc.id, rated: c.rated });
+    }
+    case 'cancelChallenge': {
+      const c = challenges.get(msg.id);
+      if (c && c.from === u.id) endChallenge(c.id, '도전을 취소했어요');
+      return;
+    }
+    case 'declineChallenge': {
+      const c = challenges.get(msg.id);
+      if (c && c.to === u.id) endChallenge(c.id, `${u.nick}님이 도전을 거절했어요`);
+      return;
+    }
+    case 'acceptChallenge': {
+      const c = challenges.get(msg.id);
+      if (!c || c.to !== u.id) return;
+      if (userGame.has(c.from) || userGame.has(c.to) || !sockets.has(c.from)) return endChallenge(c.id, '대국을 시작할 수 없어요');
+      clearTimeout(c.timer);
+      challenges.delete(c.id);
+      return void createGame({ userId: c.from }, { userId: c.to }, c.tc, c.rated);
     }
     case 'move': {
       const g = games.get(userGame.get(u.id));

@@ -133,3 +133,10 @@ td.num { text-align: right; } a.nick { color: var(--text); font-weight: 700; cur
   .panel { width: var(--bs); }
   nav { margin-left: 0; } .logo { font-size: 18px; }
 }
+
+.challenge { position: fixed; top: 70px; right: 18px; z-index: 45; width: 320px; max-width: calc(100vw - 24px); background: var(--panel); border: 2px solid var(--green); border-radius: 12px; padding: 16px; box-shadow: 0 10px 30px #000a; }
+.challenge h3 { margin: 0 0 6px; } .challenge p { margin: 0 0 12px; color: var(--muted); font-size: 14px; }
+.challenge .actions { margin-top: 0; }
+.plist { max-height: 220px; overflow-y: auto; margin: 10px 0; }
+.plist button { display: flex; width: 100%; justify-content: space-between; background: #3a3835; border: 0; border-radius: 6px; padding: 9px 12px; margin-bottom: 5px; }
+.plist button:hover { outline: 2px solid var(--green); } .plist small { color: var(--muted); }

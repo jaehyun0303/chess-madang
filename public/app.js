@@ -53,7 +53,14 @@ function connect() {
   ws.onmessage = (e) => onMsg(JSON.parse(e.data));
   ws.onclose = () => { toast('연결이 끊겼어요. 다시 연결 중…', 4000); setTimeout(connect, 1500); };
 }
-const send = (o) => ws && ws.readyState === 1 && ws.send(JSON.stringify(o));
+const send = (o) => {
+  if (ws && ws.readyState === 1) { ws.send(JSON.stringify(o)); return true; }
+  toast('서버에 연결 중이에요. 잠시 후 다시 눌러주세요.');
+  const e = $('#nickErr') || $('#chErr'); if (e) e.textContent = '서버에 연결 중이에요… 잠시 후 다시 시도하세요.';
+  return false;
+};
+// 한글 조합 중 Enter 는 무시 (마지막 글자 누락 방지)
+const onEnter = (fn) => (e) => { if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); fn(); } };
 
 function onMsg(m) {
   switch (m.type) {
@@ -76,6 +83,11 @@ function onMsg(m) {
     case 'over': onOver(m); break;
     case 'drawOffer': if (m.from !== myColor()) $('#drawBanner').classList.remove('hidden'); else toast('무승부를 제안했어요'); break;
     case 'drawDeclined': $('#drawBanner').classList.add('hidden'); toast('무승부 제안이 거절되었어요'); break;
+    case 'players': renderPlayers(m.list); break;
+    case 'challengeError': { const e = $('#chErr'); if (e) e.textContent = m.error; else toast(m.error); break; }
+    case 'challengeSent': showWaiting(m); break;
+    case 'challenge': showIncoming(m); break;
+    case 'challengeEnd': hideChallenge(m.id); if (m.reason) toast(m.reason); break;
     case 'oppStatus': oppDisconnected = !m.connected; renderBars(); if (!m.connected) toast('상대 연결이 끊겼어요 (60초 후 승리 처리)'); break;
   }
 }
@@ -100,9 +112,14 @@ function showNickModal(change) {
     <div class="err" id="nickErr"></div>
     <button class="btn primary big" id="nickOk">${change ? '변경하기' : '시작하기'}</button>`, change ? 'nick' : 'nick-first');
   const inp = $('#nickIn'); inp.focus(); inp.select();
-  const go = () => send({ type: change ? 'nick' : 'register', nick: inp.value });
+  const go = () => {
+    const v = inp.value.trim();
+    if (!/^[A-Za-z0-9_가-힣]{2,16}$/.test(v)) { $('#nickErr').textContent = '2~16자의 한글·영문·숫자·_ 만 사용할 수 있어요. (공백·특수문자 불가)'; return; }
+    $('#nickErr').textContent = '';
+    send({ type: change ? 'nick' : 'register', nick: v });
+  };
   $('#nickOk').onclick = go;
-  inp.onkeydown = (e) => e.key === 'Enter' && go();
+  inp.onkeydown = onEnter(go);
   if (change) $('#mx').onclick = closeModal;
 }
 
@@ -137,6 +154,51 @@ async function showProfile(nick) {
 $('#meChip').onclick = () => me && showProfile(me.nick);
 $('#navBoard').onclick = () => showLeaderboard();
 $('#navPlay').onclick = () => { if (!gameActive()) showPanel('lobby'); };
+
+// ---------- 친구 도전 ----------
+let pendingChallenge = null;
+function showChallengeModal() {
+  const opts = tcs.map((t) => `<option value="${t.id}" ${t.id === '5+0' ? 'selected' : ''}>${t.id} (${CAT_NAME[t.cat]})</option>`).join('');
+  openModal(`<button class="x" id="mx">×</button><h2>⚔ 친구에게 도전</h2>
+    <p class="hint">상대가 접속 중이어야 해요. 닉네임을 입력하거나 아래 목록에서 고르세요.</p>
+    <input type="text" id="chNick" maxlength="16" placeholder="상대 닉네임" autocomplete="off">
+    <div class="row"><select id="chTc">${opts}</select></div>
+    <label class="check"><input type="checkbox" id="chRated" checked> 레이팅 게임 (끄면 연습 게임)</label>
+    <div class="err" id="chErr"></div>
+    <button class="btn primary big" id="chGo">도전 신청</button>
+    <h3>🟢 접속 중인 플레이어</h3><div class="plist" id="plist"><p class="hint">불러오는 중…</p></div>`, 'challenge');
+  $('#mx').onclick = closeModal;
+  const go = () => send({ type: 'challenge', nick: $('#chNick').value, tc: $('#chTc').value, rated: $('#chRated').checked });
+  $('#chGo').onclick = go; $('#chNick').onkeydown = onEnter(go);
+  send({ type: 'players' });
+}
+function renderPlayers(list) {
+  const el = $('#plist'); if (!el) return;
+  el.innerHTML = list.length ? list.map((p) => `<button data-n="${esc(p.nick)}"><span>${esc(p.nick)}${p.busy ? ' <small>(게임 중)</small>' : ''}</span><small>${p.blitz}</small></button>`).join('')
+    : '<p class="hint">지금 접속 중인 다른 플레이어가 없어요. 친구에게 사이트 주소를 보내 보세요!</p>';
+  el.querySelectorAll('button').forEach((b) => (b.onclick = () => { $('#chNick').value = b.dataset.n; $('#chNick').focus(); }));
+}
+function showWaiting(m) {
+  closeModal();
+  pendingChallenge = m.id;
+  const c = $('#challengeCard');
+  c.innerHTML = `<h3>⏳ ${esc(m.to)}님의 답을 기다리는 중…</h3><p>${m.tc} · ${m.rated ? '레이팅 게임' : '연습 게임'} · 30초 안에 응답하지 않으면 만료돼요</p>
+    <div class="actions"><button class="btn" id="chCancel">신청 취소</button></div>`;
+  c.classList.remove('hidden');
+  $('#chCancel').onclick = () => send({ type: 'cancelChallenge', id: m.id });
+}
+function showIncoming(m) {
+  beep(700, 0.15); setTimeout(() => beep(900, 0.15), 160);
+  pendingChallenge = m.id;
+  const c = $('#challengeCard');
+  c.innerHTML = `<h3>⚔ ${esc(m.from)}님의 도전!</h3><p>레이팅 ${m.rating} · ${m.tc} · ${m.rated ? '레이팅 게임' : '연습 게임'}</p>
+    <div class="actions"><button class="btn primary" id="chYes">수락</button><button class="btn" id="chNo">거절</button></div>`;
+  c.classList.remove('hidden');
+  $('#chYes').onclick = () => send({ type: 'acceptChallenge', id: m.id });
+  $('#chNo').onclick = () => send({ type: 'declineChallenge', id: m.id });
+}
+function hideChallenge(id) { if (pendingChallenge === id) { $('#challengeCard').classList.add('hidden'); pendingChallenge = null; } }
+$('#navChallenge').onclick = () => { if (!me) return; if (gameActive()) return toast('게임 중에는 도전할 수 없어요'); showChallengeModal(); };
 
 // ---------- 로비 ----------
 function buildLobby() {
@@ -177,6 +239,7 @@ function startGameUI(g) {
   oppDisconnected = false;
   clock = { w: g.wTime, b: g.bTime, turn: g.turn, running: g.running, at: performance.now() };
   closeModal();
+  $('#challengeCard').classList.add('hidden'); pendingChallenge = null;
   showPanel('gamePanel');
   $('#overCard').classList.add('hidden');
   $('#drawBanner').classList.add('hidden');
